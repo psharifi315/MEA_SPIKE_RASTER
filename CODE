@@ -1,0 +1,215 @@
+
+#  MEA SPIKE RASTER — paste this whole thing into one Google Colab cell and run.
+#
+#  Handles both use cases with the same code:
+#    two recordings   -> before / after drug
+#    three or more    -> a timecourse, left to right
+#
+#  EDIT ONLY THE CONFIG BLOCK. To get a file path: run once so Drive mounts,
+#  then right-click the csv in Colab's left-hand browser -> "Copy path".
+
+# ------------------------------- RECORDINGS ---------------------------------
+# (column heading, path to spike_list.csv) — columns appear in this order.
+
+DRIVE = "/content/drive/MyDrive/Results/MEA/131-3907 KR25.15 CTRL GBA/"          # common folder, saves retyping
+
+#RECORDINGS = [
+ #   ("DIV25", DRIVE + "01042025_KR25.14_isogenicvsSNCATRIP_D27_BASELINE_PS(000)(000)_spike_list.csv"),
+  #  ("DIV35", DRIVE + "08042025_KR25.14_isogenicvsSNCATRIP_D34_BASELINE_PS(000)(000)_spike_list.csv"),
+   # ("DIV45", DRIVE + "18042025_KR25.14_isogenicvsSNCATRIP_D44_BASELINE_PS(000)(000)_spike_list.csv"),
+   # ("DIV65", DRIVE + "27042025_KR25.14_isogenicvsSNCATRIP_D60+_BASELINE_PS(000)(000)_spike_list.csv"),
+#]
+#For a before/after figure instead, just use two entries:
+RECORDINGS = [("WASHOUT", DRIVE + "09052025_KR25.15_CTRLvsGBA_D50_2ndC1(000)(000)_spike_list.csv"),
+ ("WASHOUT", DRIVE + "09052025_KR25.15_CTRLvsGBA_D50_2ndC1(000)(000)_spike_list.csv"),
+              ("WASHOUT", DRIVE + "09052025_KR25.15_CTRLvsGBA_D50_2ndC1(000)(000)_spike_list.csv"),
+              ("WASHOUT", DRIVE + "09052025_KR25.15_CTRLvsGBA_D50_BASELINE_C1_PS(000)(000)_spike_list.csv")]
+
+WELLS    = ["A2", "F3", "F4"]   # one row per well, in this order
+T0, T1   = 0, 60                            # time window, seconds
+OUT_STEM = DRIVE + "raster_DRUG"      # no file extension
+
+# ------------------------------- LAYOUT -------------------------------------
+
+TOTAL_W_MM = 160     # total figure width; panels divide this between them
+PANEL_H_MM = 34      # height of one well panel — raise to unsquash
+COLUMN_GAP = 0.30    # space between columns (0 = touching)
+ROW_GAP    = 0.75    # space between well rows
+
+ELECTRODE_LABELS = "sparse"   # "all" | "sparse" (every 4th) | "none"
+ELECTRODE_PT     = 4.5
+SHOW_TITLES      = False       # column headings — keep True for a timecourse
+SHOW_COUNTS      = True       # "14/16 el · 6,418 spikes" above each panel
+SPIKE_LW         = 0.5
+SCALEBAR_S       = 10
+# ----------------------------------------------------------------------------
+
+
+import csv, os, re
+import numpy as np
+import pandas as pd
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+
+try:
+    import google.colab                                   # noqa: F401
+    if not os.path.isdir('/content/drive/MyDrive'):
+        from google.colab import drive
+        drive.mount('/content/drive')
+except ImportError:
+    pass
+
+MM = 1 / 25.4
+ELEC_RE = re.compile(r'^([A-Za-z]\d{1,2})_(\d{2})$')
+ELECTRODES = ['11','12','13','14','21','22','23','24',
+              '31','32','33','34','41','42','43','44']
+
+
+def _find_columns(path):
+    """
+    Locate the data columns by reading the header row, rather than assuming
+    they sit at C-E. Different AxIS versions and plate types shift them, and
+    metadata can spill into the data columns.
+
+    Returns (time_col, electrode_col) or (2, 3) if no header is recognised.
+    """
+    with open(path, encoding='utf-8-sig', newline='') as fh:
+        for i, r in enumerate(csv.reader(fh)):
+            low = [c.strip().lower() for c in r]
+            ti = next((k for k, c in enumerate(low) if c.startswith('time')), None)
+            ei = next((k for k, c in enumerate(low) if c == 'electrode'), None)
+            if ti is not None and ei is not None:
+                return ti, ei
+            if i > 200:
+                break
+    return 2, 3
+
+
+def read_spike_list(path, wells=None, t_max=None, verbose=True):
+    """
+    Parse an AxIS spike_list.csv.
+
+    AxIS interleaves a metadata block (Investigator, detector settings, well
+    information, plate barcodes) with the spike data, so the file cannot be
+    read with a plain pd.read_csv. This finds the Time and Electrode columns
+    from the header, then keeps only rows where Time parses as a number AND
+    Electrode looks like WELL_NN. Anything else is metadata and is skipped.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"\nCould not find:\n  {path}\n"
+            "In Colab, right-click the file in the left-hand browser and "
+            "choose 'Copy path'.")
+
+    tcol, ecol = _find_columns(path)
+    rows, skipped = [], 0
+    with open(path, encoding='utf-8-sig', newline='') as fh:
+        for r in csv.reader(fh):
+            if len(r) <= max(tcol, ecol):
+                continue
+            try:
+                tv = float(r[tcol].strip())
+            except ValueError:
+                skipped += 1
+                continue
+            m = ELEC_RE.match(r[ecol].strip())
+            if not m:
+                skipped += 1
+                continue
+            if t_max is not None and tv > t_max:
+                continue
+            w, e = m.group(1), m.group(2)
+            if wells is None or w in wells:
+                rows.append((tv, w, e))
+
+    df = pd.DataFrame(rows, columns=['t', 'well', 'el'])
+    if verbose:
+        print(f"   columns: time=#{tcol}, electrode=#{ecol}   "
+              f"non-data rows skipped: {skipped:,}")
+    if df.empty:
+        raise ValueError(
+            f"\nNo spike rows found in:\n  {path}\n"
+            f"Detected time column #{tcol} and electrode column #{ecol}. "
+            "If those look wrong, open the csv and check which columns hold "
+            "'Time (s)' and 'Electrode'.")
+    return df
+
+
+def _ylabels():
+    if ELECTRODE_LABELS == "all":
+        return ELECTRODES
+    if ELECTRODE_LABELS == "sparse":
+        return [e if e in ('11', '21', '31', '41') else '' for e in ELECTRODES]
+    return [''] * 16
+
+
+def raster_panel(ax, df, well, colour='#1F3F73'):
+    d = df[(df.well == well) & (df.t >= T0) & (df.t <= T1)]
+    ax.eventplot([d[d.el == e].t.values for e in ELECTRODES],
+                 lineoffsets=range(16), linelengths=0.8,
+                 linewidths=SPIKE_LW, colors=colour)
+    ax.set_xlim(T0, T1); ax.set_ylim(-0.8, 15.8)
+    ax.set_yticks(range(16)); ax.set_yticklabels(_ylabels(), fontsize=ELECTRODE_PT)
+    ax.invert_yaxis()
+    for s in ('top', 'right', 'bottom'):
+        ax.spines[s].set_visible(False)
+    ax.tick_params(axis='y', length=0, pad=1)
+    ax.set_xticks([])
+    return len(d), d.el.nunique()
+
+
+def build():
+    mpl.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans'],
+        'font.size': 7, 'axes.linewidth': 0.6,
+        'svg.fonttype': 'none', 'pdf.fonttype': 42, 'figure.dpi': 200,
+    })
+
+    want = set(WELLS)
+    recs = []
+    for lab, path in RECORDINGS:
+        df = read_spike_list(path, want, T1)
+        found = set(df.well.unique()); missing = want - found
+        print(f"{lab:>10}: {len(df):>8,} spikes  |  found {sorted(found)}"
+              + (f"  |  MISSING {sorted(missing)}" if missing else ""))
+        recs.append((lab, df))
+
+    nrow, ncol = len(WELLS), len(recs)
+    panel_w = TOTAL_W_MM / ncol
+    fig, axes = plt.subplots(nrow, ncol, squeeze=False,
+                             figsize=(TOTAL_W_MM * MM, nrow * PANEL_H_MM * MM))
+    for j, (lab, df) in enumerate(recs):
+        for i, w in enumerate(WELLS):
+            ax = axes[i][j]
+            n, na = raster_panel(ax, df, w)
+            if SHOW_TITLES and i == 0:
+                ax.set_title(lab, fontsize=8, fontweight='bold', pad=5)
+            if j == 0:
+                ax.set_ylabel(w, fontsize=8.5, fontweight='bold', rotation=0,
+                              ha='right', va='center', labelpad=16)
+            else:
+                ax.set_yticklabels([''] * 16)
+            if SHOW_COUNTS:
+                ax.annotate(f'{na}/16 · {n:,}', (1.0, 1.03),
+                            xycoords='axes fraction', ha='right', va='bottom',
+                            fontsize=4.6, color='#777')
+
+    ax = axes[-1][0]; y = ax.get_ylim()[0]
+    ax.plot([T0, T0 + SCALEBAR_S], [y + 0.9] * 2, color='#111', lw=1.3,
+            clip_on=False, solid_capstyle='butt')
+    ax.annotate(f'{SCALEBAR_S} s', (T0 + SCALEBAR_S / 2, y + 1.9), ha='center',
+                va='top', fontsize=6.5, annotation_clip=False)
+
+    fig.tight_layout(pad=0.3)
+    fig.subplots_adjust(hspace=ROW_GAP, wspace=COLUMN_GAP)
+    os.makedirs(os.path.dirname(OUT_STEM) or '.', exist_ok=True)
+    for ext in ('pdf', 'svg', 'png'):
+        fig.savefig(f'{OUT_STEM}.{ext}', bbox_inches='tight', pad_inches=0.03)
+    print(f"\n{ncol} columns at {panel_w:.0f} mm each")
+    print(f"saved {OUT_STEM}.pdf / .svg / .png")
+    plt.show()
+    return fig
+
+
+fig = build()
